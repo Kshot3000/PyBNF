@@ -3506,6 +3506,7 @@ class Configuration:
         # to BE (a start point, a box, an unbounded prior), which is a property of the
         # built FreeParameter rather than of the config key that declared it (#603).
         self._check_variable_keyword_combination(fit_type, variables)
+        self._check_variable_name_collisions(variables)
         logger.info('Loaded variables')
         return variables
 
@@ -3767,6 +3768,66 @@ class Configuration:
         if not v.has_prior:
             return 'point'
         return 'box' if v.has_bounded_support else 'unbounded'
+
+    @staticmethod
+    def _check_variable_name_collisions(variables):
+        """Refuse free parameters whose names collide as output file names (#931).
+
+        Several outputs are written one file per parameter, named after the
+        parameter: the samplers' ``Results/Histograms/<name>_final.txt``
+        (``Sampler.update_histograms``) and profile likelihood's
+        ``profile_<name>.txt``. Two parameters whose names differ only in
+        capitalisation -- ``k`` and ``K`` -- name two different files on a
+        case-sensitive file system but the *same* file on the case-insensitive
+        file systems that are the default on macOS and Windows, so the second
+        parameter's file silently replaces the first's: one histogram (or
+        profile curve) is lost, and the surviving file holds the other
+        parameter's numbers under the wrong name. No error is raised anywhere
+        along the way, and the credible-interval files cannot reveal it --
+        they are written per interval, not per parameter. Two parameters with
+        the *identical* name collide on every file system, and additionally
+        share one name in every by-name lookup (the samples file's columns,
+        start points, the objective's binding), so they are refused on the
+        same grounds.
+
+        The check keys on the built ``FreeParameter`` list, not on config
+        keys, so it covers both declaration syntaxes -- the legacy ``*_var``
+        keywords and the edition-2 ``parameter:`` records -- the same reason
+        :meth:`_check_variable_keyword_combination` keys on the built list
+        (#603). Comparison is by ``str.casefold``, the Unicode caseless
+        matching rule; parameter names are identifiers, so in practice this
+        is ASCII case.
+        """
+        by_folded = {}
+        for v in variables:
+            by_folded.setdefault(v.name.casefold(), []).append(v.name)
+        for folded in sorted(by_folded):
+            names = by_folded[folded]
+            if len(names) < 2:
+                continue
+            distinct = sorted(set(names))
+            if len(distinct) == 1:
+                raise PybnfError(
+                    'Free parameter declared more than once',
+                    f"Parameter '{distinct[0]}' is declared {len(names)} times. Two free "
+                    f"parameters cannot share a name: each one's per-parameter output "
+                    f"files (Results/Histograms/{distinct[0]}_final.txt, "
+                    f"profile_{distinct[0]}.txt) would overwrite the other's, and every "
+                    f"by-name lookup would see only one of them.\nDeclare the parameter "
+                    f"once, or rename one of the declarations.")
+            listed = ', '.join(f"'{n}'" for n in distinct)
+            raise PybnfError(
+                'Free parameter names differ only in capitalisation',
+                f"Parameters {listed} differ only in capitalisation. PyBNF writes one "
+                f"output file per parameter, named after it (for example "
+                f"Results/Histograms/{distinct[0]}_final.txt and "
+                f"Results/Histograms/{distinct[1]}_final.txt, and profile likelihood's "
+                f"profile_<name>.txt files). On a case-insensitive file system -- the "
+                f"default on macOS and Windows -- those are the same file, so one "
+                f"parameter's file would silently replace the other's and the surviving "
+                f"file would hold the wrong parameter's results.\nRename one of the "
+                f"parameters so that no two free parameter names differ only in "
+                f"capitalisation.")
 
     def _check_variable_keyword_combination(self, fit_type, variables):
         """Validate that the fit's free-parameter declarations match what the fit_type

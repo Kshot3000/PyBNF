@@ -729,6 +729,73 @@ class TestParameterRecordConfig:
             c._free_parameter_from_record('k', fields, 'prior')
 
 
+class TestVariableNameCaseCollisions:
+    """Two free parameters whose names differ only in capitalisation are refused
+    at load (#931).
+
+    The samplers write one histogram file per parameter
+    (Results/Histograms/<name>_final.txt) and profile likelihood writes
+    profile_<name>.txt; on the case-insensitive file systems that are the
+    default on macOS and Windows, 'k' and 'K' name the same file, so one
+    parameter's file silently replaced the other's. Built simulator-free over
+    an AnalyticalModel .target, following TestParameterRecordConfig.
+    """
+
+    _GAUSS_TARGET = json.dumps({'type': 'gaussian', 'mean': [0.0], 'variance': [1.0]})
+    _TARGET_EXP = '# index\tscore\n0\t0\n'
+
+    def _build(self, tmp_path, monkeypatch, param_lines, job_type='de'):
+        (tmp_path / 'gaussian.target').write_text(self._GAUSS_TARGET)
+        (tmp_path / 'target.exp').write_text(self._TARGET_EXP)
+        monkeypatch.chdir(tmp_path)
+        conf = (f'edition = 2\njob_type = {job_type}\nobjective = sos\n'
+                'model = gaussian.target : target.exp\n'
+                'population_size = 5\nmax_iterations = 5\nwall_time_sim = 0\n'
+                + ''.join(line + '\n' for line in param_lines))
+        return config.Configuration(parse.ploop(conf.splitlines(keepends=True)))
+
+    def test_case_colliding_names_refused_legacy_syntax(self, tmp_path, monkeypatch):
+        with pytest.raises(printing.PybnfError, match='differ only in capitalisation'):
+            self._build(tmp_path, monkeypatch,
+                        ['uniform_var = k 0 10', 'uniform_var = K 50 100'])
+
+    def test_case_colliding_names_refused_record_syntax(self, tmp_path, monkeypatch):
+        with pytest.raises(printing.PybnfError, match='differ only in capitalisation'):
+            self._build(tmp_path, monkeypatch,
+                        ['parameter: k, prior: uniform, lower: 0, upper: 10',
+                         'parameter: K, prior: uniform, lower: 50, upper: 100'])
+
+    def test_case_colliding_names_refused_mixed_syntax(self, tmp_path, monkeypatch):
+        with pytest.raises(printing.PybnfError, match='differ only in capitalisation'):
+            self._build(tmp_path, monkeypatch,
+                        ['uniform_var = k 0 10',
+                         'parameter: K, prior: uniform, lower: 50, upper: 100'])
+
+    def test_error_names_both_parameters(self, tmp_path, monkeypatch):
+        with pytest.raises(printing.PybnfError) as excinfo:
+            self._build(tmp_path, monkeypatch,
+                        ['uniform_var = k 0 10', 'uniform_var = K 50 100'])
+        assert "'K'" in str(excinfo.value) and "'k'" in str(excinfo.value)
+
+    def test_same_name_declared_twice_refused(self, tmp_path, monkeypatch):
+        # The identical name under two declaration kinds reaches the built
+        # variable list twice; its per-parameter files collide on every file
+        # system, not only case-insensitive ones.
+        with pytest.raises(printing.PybnfError, match='declared more than once'):
+            self._build(tmp_path, monkeypatch,
+                        ['uniform_var = k 0 10', 'normal_var = k 5 1'])
+
+    def test_distinct_names_load(self, tmp_path, monkeypatch):
+        c = self._build(tmp_path, monkeypatch,
+                        ['uniform_var = k 0 10', 'uniform_var = K2 50 100'])
+        assert sorted(v.name for v in c.variables) == ['K2', 'k']
+
+    def test_names_sharing_a_prefix_load(self, tmp_path, monkeypatch):
+        c = self._build(tmp_path, monkeypatch,
+                        ['uniform_var = kon 0 10', 'uniform_var = koff 50 100'])
+        assert sorted(v.name for v in c.variables) == ['koff', 'kon']
+
+
 class TestNewEraNormalization:
     """Per-observable normalization on the new-era surface (#444, ADR-0053).
 
